@@ -2,9 +2,9 @@
 
 A custom QEMU DMA device and Linux platform driver implementing memory-mapped registers, interrupt-driven completion, coherent DMA buffers, and a userspace ioctl interface.
 
-The project follows the complete device-to-application path: QEMU device modeling, bare-metal validation, ACPI enumeration, Linux driver integration, and userspace benchmarking.
+The project follows the complete path from low-level bare-metal bring-up to ACPI enumeration, Linux driver integration, and userspace benchmarking.
 
-Validation covers normal transfers, invalid requests, timeout recovery, module unloading and reloading, and concurrent requests from two processes using distinct data patterns.
+Besides normal transfers, validation covers invalid requests, timeout recovery, module unload/reload, and concurrent requests from two processes using distinct data patterns.
 
 ---
 
@@ -14,8 +14,7 @@ Validation covers normal transfers, invalid requests, timeout recovery, module u
 - MMIO register interface
 - Timer-based asynchronous device completion
 - Interrupt-driven DMA transfers
-- 32-bit bare-metal device validation
-- IOAPIC routing and IDT interrupt handling
+- 32-bit bare-metal DMA bring-up
 - ACPI device enumeration
 - Linux platform driver
 - Coherent DMA source and destination buffers
@@ -33,27 +32,22 @@ Validation covers normal transfers, invalid requests, timeout recovery, module u
 
 # Project Structure
 
-Selected files in the development workspace:
-
 ```text
 qemu-dma-lab/
 ├── README.md
 ├── .gitignore
 │
-├── qemu-src/
-│   ├── hw/
-│   │   ├── i386/
-│   │   │   ├── acpi-microvm.c
-│   │   │   └── microvm.c
-│   │   └── misc/
-│   │       ├── meson.build
-│   │       └── philip_dma.c
-│   └── include/
-│       └── hw/
-│           └── misc/
-│               └── philip_dma.h
+├── qemu-src/                         # Local QEMU checkout
+│   ├── hw/i386/
+│   │   ├── acpi-microvm.c
+│   │   └── microvm.c
+│   ├── hw/misc/
+│   │   ├── meson.build
+│   │   └── philip_dma.c
+│   └── include/hw/misc/
+│       └── philip_dma.h
 │
-├── baremetal/
+├── baremetal/                        # Low-level DMA bring-up
 │   ├── Makefile
 │   ├── boot.S
 │   ├── start.S
@@ -61,63 +55,47 @@ qemu-dma-lab/
 │   ├── main.c
 │   └── dma_test.c
 │
-├── driver/
+├── driver/                           # Linux platform driver
 │   ├── Makefile
 │   └── philip_dma_drv.c
 │
-├── include/
+├── include/                          # Shared kernel/userspace ABI
 │   └── philip_dma_uapi.h
 │
-├── userspace/
+├── userspace/                        # Userspace benchmarks
 │   ├── philip_dma_test.c
 │   └── philip_dma_concurrent.c
 │
-├── tests/
+├── tests/                            # Functional and negative tests
 │   ├── philip_dma_negative.c
 │   └── philip_dma_verify.c
 │
 ├── linux-guest/
 │   ├── init
-│   └── initramfs/
-│       ├── init
-│       ├── bin/
-│       │   ├── philip_dma_test
-│       │   ├── philip_dma_negative
-│       │   └── philip_dma_concurrent
-│       └── lib/
-│           └── modules/
-│               └── philip_dma_drv.ko
+│   └── initramfs/                    # Generated guest root filesystem
 │
-├── patches/
+├── patches/                          # Reproducible QEMU changes
 │   ├── README.md
 │   ├── QEMU_BASE_COMMIT
 │   └── 0001-philip-dma.patch
 │
-└── docs/
-    └── images/
-        └── architecture.svg
+└── docs/images/
+    └── architecture.svg
 ```
 
 | Directory | Purpose |
 | --- | --- |
-| `qemu-src/` | Local QEMU source tree containing the custom DMA device and microvm integration |
-| `baremetal/` | 32-bit bare-metal boot code, linker script, MMIO tests, and interrupt validation |
+| `qemu-src/` | Local QEMU source tree containing the custom DMA device |
+| `baremetal/` | Boot code, linker script, MMIO tests, and interrupt validation |
 | `driver/` | Linux platform driver and kernel-module Makefile |
-| `include/` | Shared ioctl definitions used by the kernel driver and userspace |
-| `userspace/` | Userspace transfer benchmark and concurrent correctness test |
-| `tests/` | Negative tests and additional data-verification programs |
-| `linux-guest/` | Guest init script and initramfs contents |
-| `patches/` | Patch that reproduces the custom QEMU changes from QEMU v10.2.4 |
-| `docs/images/` | Project architecture diagram |
+| `include/` | Shared kernel/userspace ioctl definitions |
+| `userspace/` | Transfer benchmark and concurrent correctness test |
+| `tests/` | Negative tests and additional data verification |
+| `linux-guest/` | Guest initialization and initramfs packaging |
+| `patches/` | Patch reproducing the custom QEMU changes from v10.2.4 |
+| `docs/images/` | Architecture diagram |
 
-The `qemu-src/` directory is the local QEMU checkout used during
-development. The reproducible QEMU changes are also stored as
-`patches/0001-philip-dma.patch`.
-
-The `linux-guest/initramfs/` directory contains generated deployment
-files used to build the guest initramfs. Kernel images, compiled
-binaries, backup files, and other build artifacts are excluded from
-the Git repository.
+The local QEMU checkout and generated initramfs are development artifacts. The reproducible QEMU changes are preserved in `patches/0001-philip-dma.patch`.
 
 ---
 
@@ -125,35 +103,28 @@ the Git repository.
 
 ![QEMU DMA Lab Architecture](docs/images/architecture.svg)
 
-Userspace applications submit synchronous ioctl requests through `/dev/philip_dma`.
-
-The Linux platform driver prepares coherent DMA buffers and configures the QEMU DMA device through MMIO. The emulated device accesses guest memory and signals completion through an IRQ.
-
-A mutex serializes access to the shared DMA engine, while a completion allows the calling task to sleep until the transfer finishes or times out.
-
-The device operates asynchronously, while the current userspace API waits for completion before returning.
+Userspace submits a synchronous ioctl request through `/dev/philip_dma`. The Linux driver prepares coherent buffers and configures the QEMU DMA device through MMIO. The device performs the memory copy and signals completion through an IRQ.
 
 ---
 
-# Bare-Metal Validation
+# Bare-Metal DMA Bring-up
 
-Before integrating the Linux driver, the custom DMA device was validated with a 32-bit bare-metal test program running on QEMU microvm.
+Before Linux integration, the custom DMA device was validated with 32-bit bare-metal code running on QEMU microvm. This stage exercises the hardware/software boundary without Linux APIs, platform-driver helpers, or a filesystem.
 
-This stage tested the device directly, without Linux or its driver APIs.
+This is relevant to SoC, NPU, accelerator, and firmware work because it demonstrates how software brings up an engine directly through memory-mapped registers, guest memory, and interrupts before full operating-system integration.
 
-Validation covered:
+## Validation Scope
 
-- MMIO register access
-- Source, destination, and transfer-length configuration
-- DMA transfer initiation and status polling
+- Assembly entry and linker-script controlled memory layout
+- Direct MMIO register access
+- DMA source, destination, and length programming
+- Device status polling
 - Guest-memory copy verification
-- IOAPIC interrupt routing
-- IDT entry and interrupt-handler execution
-- Completion detection through interrupt counters and test flags
+- IOAPIC routing and interrupt-vector setup
+- IDT and ISR execution
+- Completion flags and interrupt counters
 
-## Memory-Copy Validation
-
-A 16-byte transfer used the following guest physical addresses:
+## Memory-Copy Test
 
 | Parameter | Value |
 | --- | --- |
@@ -161,226 +132,108 @@ A 16-byte transfer used the following guest physical addresses:
 | Destination address | `0x120000` |
 | Transfer length | 16 bytes |
 
-QEMU monitor memory inspection confirmed that the destination contained the expected source data after the transfer.
+QEMU monitor inspection confirmed that the destination contained the expected copied data.
 
-## Interrupt Validation
+## Interrupt Test
 
-The interrupt test used GSI 16, routed to interrupt vector `0x2E`.
+The interrupt test uses GSI 16 and routes it to vector `0x2E`.
 
-QEMU monitor inspection confirmed:
-
-| Variable | Observed Result |
+| Variable | Result |
 | --- | --- |
-| `dma_irq_count` | Changed from 0 to 1 |
-| `dma_irq_seen` | Changed from 0 to 1 |
-| `dma_test_pass` | Changed from 0 to 1 |
+| `dma_irq_count` | 0 → 1 |
+| `dma_irq_seen` | 0 → 1 |
+| `dma_test_pass` | 0 → 1 |
 | `dma_test_fail` | Remained 0 |
-
-The QEMU interrupt log recorded:
 
 ```text
 Servicing hardware INT=0x2e
 ```
 
-These checks validated the basic MMIO, memory-copy, and interrupt paths before moving to ACPI enumeration, Linux DMA buffers, and completion-based waiting.
-
-The bare-metal interrupt vector is specific to the bare-metal test. Linux manages interrupt routing and vector allocation independently.
+This stage validated MMIO, memory movement, interrupt routing, and ISR execution before ACPI enumeration and Linux driver integration.
 
 ---
 
-# Linux Driver Design
+# QEMU DMA Device Model
 
-## Device Enumeration
-
-The device is described through ACPI and matched by the Linux platform driver.
+The device is implemented as a QEMU SysBus device and integrated into the microvm machine.
 
 | Resource | Configuration |
 | --- | --- |
-| ACPI HID | `PHL0001` |
 | MMIO base | `0xFE800000` |
-| MMIO region size | `0x1000` bytes |
-| Interrupt source | GSI 16 |
-| Device node | `/dev/philip_dma` |
+| MMIO size | `0x1000` bytes |
+| Source register | `0x00`, 64-bit |
+| Destination register | `0x08`, 64-bit |
+| Length register | `0x10` |
+| Control register | `0x14` |
+| Status register | `0x18` |
+| IRQ status | `0x1C`, write-one-to-clear |
+| IRQ enable | `0x20` |
+| Completion model | QEMU virtual-clock timer |
 
-Linux maps the ACPI interrupt resource to a Linux IRQ number.
-
-The previously observed Linux IRQ was 49. The driver obtains the IRQ from platform resources rather than assuming that the Linux IRQ equals the GSI.
-
----
-
-## Register Interface
-
-| Offset | Register | Purpose |
-| --- | --- | --- |
-| `0x00` | `SRC_ADDR` | Source DMA address, 64-bit |
-| `0x08` | `DST_ADDR` | Destination DMA address, 64-bit |
-| `0x10` | `LENGTH` | Transfer length |
-| `0x14` | `CONTROL` | START and ABORT commands |
-| `0x18` | `STATUS` | Engine state |
-| `0x1C` | `IRQ_STATUS` | Pending interrupt; write-one-to-clear |
-| `0x20` | `IRQ_ENABLE` | Interrupt enable |
-
-The QEMU device uses a virtual-clock timer to model transfer completion.
-
----
-
-## Userspace Interface
-
-Kernel and userspace share ioctl definitions through:
-
-```text
-include/philip_dma_uapi.h
-```
-
-The transfer command is:
+The latest confirmed source setting is:
 
 ```c
-PHILIP_DMA_IOC_TRANSFER
+#define DMA_DELAY_NS 10000ULL
 ```
 
-The request contains inline source and destination arrays:
+This represents a nominal 10 us simulated device delay.
+
+---
+
+# Linux Driver Integration
+
+The device is described through ACPI HID `PHL0001` and matched by a Linux platform driver.
+
+| Component | Implementation |
+| --- | --- |
+| Enumeration | ACPI platform device |
+| Register mapping | `devm_ioremap_resource()` |
+| DMA memory | Coherent source and destination buffers |
+| Completion | Linux `completion` object |
+| Interrupt | Linux IRQ handler with W1C acknowledgement |
+| Userspace interface | Misc device `/dev/philip_dma` |
+| Shared-engine lock | `xfer_lock` mutex |
+
+## Transfer Path
+
+1. Userspace fills `src[]` and calls `PHILIP_DMA_IOC_TRANSFER`.
+2. The driver copies the request into a private kernel allocation.
+3. `xfer_lock` serializes access to the shared DMA engine.
+4. Source data is copied into the coherent source buffer.
+5. DMA addresses, length, and control registers are programmed.
+6. The driver waits with `wait_for_completion_timeout()`.
+7. The IRQ handler clears `IRQ_STATUS` and calls `complete()`.
+8. Destination data is copied into the private request and returned to userspace.
+
+The shared request structure is:
 
 ```c
 struct philip_dma_ioc_transfer {
     __u32 len;
     __u32 reserved;
-
     __u8 src[PHILIP_DMA_MAX_LEN];
     __u8 dst[PHILIP_DMA_MAX_LEN];
 };
 ```
 
-The maximum transfer size is 4096 bytes.
-
-Each ioctl uses a private kernel-side request structure. The driver copies source data into a coherent DMA buffer and copies the completed result back into the private request before returning it to userspace.
-
----
-
-## Synchronization
-
-| Mechanism | Purpose |
-| --- | --- |
-| `xfer_lock` mutex | Serialize access to the shared DMA engine and buffers |
-| Completion | Wait for the IRQ handler to report transfer completion |
-
-The transfer mutex protects:
-
-- Shared source-buffer preparation
-- Shared destination-buffer preparation
-- Device register programming
-- Transfer completion waiting
-- Copying the result into the private request
-
-Once the result is stored in the private request, copying it back to userspace does not require holding the shared-engine mutex.
-
-Multiple processes can submit requests concurrently, while the driver processes transfers sequentially through the single DMA engine.
-
----
-
-## Interrupt Completion
-
-Before starting a transfer, the driver resets its completion state.
-
-The IRQ handler:
-
-1. Reads the device interrupt status.
-2. Checks whether the completion interrupt belongs to the device.
-3. Acknowledges the interrupt using write-one-to-clear semantics.
-4. Calls `complete()` to wake the waiting task.
-
-The transfer path uses `wait_for_completion_timeout()` to bound the completion wait.
-
----
+The maximum transfer length is 4096 bytes.
 
 ## Timeout Recovery
 
-Tested recovery scenarios include:
-
-- Delayed DMA completion
-- Missing completion interrupts
-
-The recovery path stops the previous operation and prepares the device for subsequent requests.
-
-A timed-out request remains an error even when recovery succeeds.
-
-Both tested scenarios allowed another normal transfer after recovery.
-
----
-
-# QEMU Source Changes
-
-The custom QEMU changes are distributed as a patch against **QEMU v10.2.4**.
-
-The exact base commit is recorded in:
-
-```text
-patches/QEMU_BASE_COMMIT
-```
-
-The patch is located at:
-
-```text
-patches/0001-philip-dma.patch
-```
-
-For a fresh checkout, run from the repository root:
-
-```bash
-git clone --branch v10.2.4 --depth 1 \
-    https://gitlab.com/qemu-project/qemu.git qemu-src
-```
-
-Verify the base commit:
-
-```bash
-git -C qemu-src rev-parse HEAD
-cat patches/QEMU_BASE_COMMIT
-```
-
-The two commit IDs should match.
-
-Check and apply the patch:
-
-```bash
-git -C qemu-src apply --check \
-    ../patches/0001-philip-dma.patch
-```
-
-If the check succeeds:
-
-```bash
-git -C qemu-src apply \
-    ../patches/0001-philip-dma.patch
-```
-
-**Apply the patch only to a clean base checkout. The development checkout already contains these changes and must not have the patch applied again.**
-
-See [patches/README.md](patches/README.md) for additional information.
+The driver handles delayed completion and missing completion interrupts. Recovery aborts the previous operation, clears device state, and returns an error for the timed-out request. A later normal transfer can then succeed.
 
 ---
 
 # Build and Run
 
-The following commands cover driver and test deployment in the existing development environment.
-
-Full QEMU build configuration, initial BusyBox filesystem creation, and complete bare-metal and Linux launch commands remain to be documented.
-
-## Build the Linux Driver
-
-Run from the repository root.
-
-When the guest uses the running development-host kernel:
+## Linux Driver
 
 ```bash
 make -C /lib/modules/"$(uname -r)"/build \
     M="$PWD/driver" modules
 ```
 
-If the guest uses another kernel release, replace `$(uname -r)` with that release and use its matching headers.
-
----
-
-## Build the Concurrent Test
+## Concurrent Test
 
 ```bash
 gcc -O2 -Wall -Wextra -std=c11 -static \
@@ -389,20 +242,9 @@ gcc -O2 -Wall -Wextra -std=c11 -static \
     -o userspace/philip_dma_concurrent
 ```
 
-Static linking allows the executable to run in the minimal guest filesystem without additional dynamic libraries.
-
----
-
 ## Install into the Initramfs
 
-These commands assume that the BusyBox initramfs tree has already been prepared.
-
 ```bash
-cp linux-guest/init \
-   linux-guest/initramfs/init
-
-chmod +x linux-guest/initramfs/init
-
 cp driver/philip_dma_drv.ko \
    linux-guest/initramfs/lib/modules/
 
@@ -410,45 +252,25 @@ cp userspace/philip_dma_concurrent \
    linux-guest/initramfs/bin/
 ```
 
-Package the filesystem:
-
 ```bash
 (
     set -o pipefail
     cd linux-guest/initramfs || exit 1
-
     find . -print0 |
         cpio --null -o --format=newc |
         gzip -9 > ../initramfs.cpio.gz
 )
 ```
 
-Boot using the custom QEMU build, a compatible guest kernel, and the generated `linux-guest/initramfs.cpio.gz`.
-
----
-
 ## Run in the Guest
-
-Load the driver:
 
 ```sh
 insmod /lib/modules/philip_dma_drv.ko
-```
 
-Run the concurrent correctness test:
-
-```sh
 /bin/philip_dma_concurrent
-rc=$?
+echo "exit code=$?"
 
-echo "exit code=$rc"
 dmesg | tail -n 40
-```
-
-Unload after testing:
-
-```sh
-rmmod philip_dma_drv
 ```
 
 ---
@@ -457,22 +279,9 @@ rmmod philip_dma_drv
 
 The experiments run in a Linux guest under QEMU TCG, with QEMU itself running inside an Ubuntu VirtualBox VM.
 
-| Component | Configuration |
-| --- | --- |
-| Outer virtualization | VirtualBox |
-| Development environment | Ubuntu |
-| Device emulator | Custom QEMU build |
-| Guest machine | x86_64 microvm |
-| Execution mode | TCG |
-| Guest userspace | BusyBox v1.37.0 with a custom initramfs |
-| Transfer interface | Synchronous ioctl |
-| Maximum transfer size | 4096 bytes |
+Reported performance includes the effects of the driver, device emulation, interrupt delivery, and scheduling across the virtualized environment. These measurements do not represent physical DMA hardware performance.
 
-Measured performance includes driver execution, device emulation, interrupt delivery, and scheduling across the virtualized environment.
-
-These results do not represent physical DMA hardware performance.
-
-Reported metrics include:
+The benchmark reports:
 
 - Average latency
 - Minimum latency
@@ -481,17 +290,9 @@ Reported metrics include:
 - Operations per second
 - Throughput in MiB/s
 
-Earlier experiments included logging-on/off comparisons, five repeated runs for 16-, 64-, and 256-byte requests, and a nominal delay sweep from 1 ms to 100 us and 10 us.
+Earlier work included logging-on/off comparisons, five repeated runs for 16-, 64-, and 256-byte requests, and a nominal device-delay sweep from 1 ms to 100 us and 10 us.
 
-Those historical results still need to be matched to exact runtime configurations before publishing a consolidated comparison.
-
-The latest confirmed source setting was:
-
-```c
-#define DMA_DELAY_NS 10000ULL
-```
-
-This represents a nominal simulated delay of 10 us. Source configuration alone does not establish which rebuilt QEMU executable produced a particular result.
+The latest confirmed source delay was `DMA_DELAY_NS = 10000ULL` (10 us).
 
 ---
 
@@ -499,17 +300,7 @@ This represents a nominal simulated delay of 10 us. Source configuration alone d
 
 ## Two-Process Transfer Benchmark
 
-Two instances of the existing benchmark are launched in the background.
-
-Configuration:
-
-- Processes: 2
-- Transfer size: 4096 bytes
-- Iterations per process: 1000
-- Interface: synchronous ioctl
-- Shared DMA engine protected by `xfer_lock`
-
-Execution:
+Two instances of the benchmark are launched in the background.
 
 ```sh
 /bin/philip_dma_test 4096 > /tmp/dma_A.log 2>&1 &
@@ -531,17 +322,19 @@ cat /tmp/dma_A.log
 cat /tmp/dma_B.log
 ```
 
-Reported values describe each process independently.
+Configuration:
 
-A common measurement interval was not recorded. The two throughput values are therefore not combined into aggregate device throughput.
-
----
+- Processes: 2
+- Transfer size: 4096 bytes
+- Iterations per process: 1000
+- Interface: synchronous ioctl
+- Shared DMA engine protected by `xfer_lock`
 
 ## Concurrent Data Integrity
 
-The dedicated correctness test uses `fork()` to create two processes. Each independently opens `/dev/philip_dma`.
+The dedicated correctness test uses `fork()` to create two processes. Each independently opens the device.
 
-Before each transfer, the processes exchange ready tokens through `socketpair()`.
+Before every transfer, the processes exchange ready tokens through `socketpair()`.
 
 Each source pattern includes:
 
@@ -549,20 +342,7 @@ Each source pattern includes:
 - An iteration number
 - Position-dependent data
 
-After every ioctl, all destination bytes are compared against an independent expected buffer.
-
-Configuration:
-
-- Processes: 2
-- Iterations per process: 1000
-- Transfer size: 4096 bytes
-- Verification: every byte of every transfer
-- Synchronization: per-round rendezvous
-- Failure reporting: nonzero exit status
-
-This checks for cross-process data contamination and stale results from earlier iterations.
-
-The rendezvous brings both processes to the submission stage before proceeding with each round. It does not guarantee simultaneous driver entry or parallel execution by the DMA engine.
+After every ioctl, all 4096 destination bytes are compared against an independent expected buffer.
 
 ---
 
@@ -586,15 +366,9 @@ Recorded run: 4096-byte requests, 1000 iterations per process.
 
 Both processes completed successfully.
 
-The supplied kernel log contained no related DMA timeout, Oops, or BUG report.
-
 Median latency was approximately **0.52–0.59 ms**, while P99 reached approximately **2.17–2.38 ms**.
 
 Maximum values reached approximately **23.5–26.7 ms**, showing a substantial latency tail in this run.
-
-This basic run did not establish distinct source patterns or record exact execution overlap. Data isolation was checked separately with the dedicated correctness test.
-
----
 
 ## Concurrent Data Integrity
 
@@ -619,7 +393,7 @@ exit code=0
 
 **All 2000 transfers passed byte-by-byte verification.**
 
-Elapsed time includes pattern preparation, synchronization, ioctl execution, and verification. It is not a measurement of pure DMA execution time.
+Elapsed time includes pattern generation, synchronization, ioctl execution, and verification. It is not a measurement of pure DMA execution time.
 
 ---
 
@@ -628,7 +402,7 @@ Elapsed time includes pattern preparation, synchronization, ioctl execution, and
 | Test | Observed Result | Status |
 | --- | --- | --- |
 | Bare-metal memory copy | Expected data observed in destination memory | PASS |
-| Bare-metal interrupt | IRQ counter and completion flags updated | PASS |
+| Bare-metal interrupt and ISR | IRQ counter and completion flags updated | PASS |
 | Zero-length request | `EINVAL`; subsequent normal transfer succeeds | PASS |
 | Oversized request: 4097 bytes | `EINVAL`; subsequent normal transfer succeeds | PASS |
 | Unsupported ioctl | `ENOTTY`; subsequent normal transfer succeeds | PASS |
@@ -650,51 +424,29 @@ remove: engine idle, IRQ handler released
 driver removed
 ```
 
-Normal module unload protection does not establish safety for sysfs unbind with an open descriptor, hot removal, or device removal during an active transfer.
-
-Those scenarios are outside the completed validation scope.
-
 ---
 
 # Discussion
 
 ## Bare-Metal and Linux Validation
 
-Bare-metal testing validated the basic device behavior without relying on Linux enumeration, DMA allocation, or completion APIs.
+Bare-metal testing validated the device directly through MMIO, memory access, and interrupts.
 
-Linux integration added platform resource discovery, coherent DMA allocation, process-context waiting, and a userspace interface.
+Linux integration added ACPI resource discovery, coherent DMA allocation, process-context waiting, IRQ completion, timeout recovery, and a userspace ABI.
 
-Testing both environments helped separate device-model and interrupt-routing issues from Linux driver integration issues.
-
----
+Together, the two stages demonstrate both low-level firmware-style bring-up and operating-system driver integration.
 
 ## Userspace-Visible Latency
 
 Transfer latency can include request copying, mutex waiting, coherent-buffer preparation, MMIO access, emulated device delay, interrupt processing, scheduling, and result copying.
 
-The exact timing boundaries should be checked against the benchmark source before comparing its output with another implementation.
-
 A configured device delay is not the same as observed ioctl latency.
-
----
-
-## Tail Latency
-
-Both processes showed a large gap between median and maximum latency.
-
-Host activity, VirtualBox scheduling, QEMU execution, and guest scheduling are possible contributors. The current measurements do not isolate their individual effects.
-
-These results describe this particular run and do not establish a general latency guarantee.
-
----
 
 ## Shared Resource Synchronization
 
 The two-process correctness test supports the effectiveness of the current mutex-protected transfer path under the tested workload.
 
 No cross-process or stale-pattern corruption was observed.
-
-Concurrent request submission is supported through serialization of a single DMA engine. The test does not demonstrate parallel hardware transfers or prove the absence of every possible race.
 
 ---
 
@@ -715,14 +467,11 @@ Implemented and validated:
 
 Documentation follow-up:
 
-- Archive original benchmark and validation logs.
+- Archive the original benchmark and validation logs.
 - Record matching source commits and binary identities.
 - Record the exact guest configuration.
 - Consolidate historical logging comparisons and delay-sweep results.
-- Document full QEMU build and guest filesystem setup.
-- Document the complete bare-metal and Linux launch commands.
-
-Only results with confirmed configuration mappings should be used for comparative performance claims.
+- Document the complete QEMU build and guest launch command.
 
 ---
 
@@ -738,3 +487,9 @@ Potential extensions include:
 - Kernel and QEMU tracing to separate latency contributions
 - Asynchronous userspace submission and completion notification
 - CSV result export and automated benchmark visualization
+
+---
+
+# License
+
+MIT License
