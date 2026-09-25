@@ -1,0 +1,733 @@
+diff --git a/hw/i386/acpi-microvm.c b/hw/i386/acpi-microvm.c
+index bc6571778c..da385aa8fa 100644
+--- a/hw/i386/acpi-microvm.c
++++ b/hw/i386/acpi-microvm.c
+@@ -46,6 +46,13 @@
+ 
+ #include CONFIG_DEVICES
+ 
++#define PHILIP_DMA_ACPI_HID   "PHL0001"
++#define PHILIP_DMA_ACPI_NAME  "PDMA"
++
++#define PHILIP_DMA_BASE       0xFE800000
++#define PHILIP_DMA_SIZE       0x1000
++#define PHILIP_DMA_GSI        16
++
+ static void acpi_dsdt_add_virtio(Aml *scope,
+                                  MicrovmMachineState *mms)
+ {
+@@ -99,6 +106,128 @@ static void acpi_dsdt_add_pci(Aml *scope, MicrovmMachineState *mms)
+     acpi_dsdt_add_gpex(scope, &mms->gpex);
+ }
+ 
++static void acpi_dsdt_add_philip_dma(Aml *scope)
++{
++    Aml *dev;
++    Aml *crs;
++    uint32_t irq;
++
++    /*
++     * ACPI Device object:
++     *
++     * Device (PDMA)
++     * {
++     *     _HID = "PHL0001"
++     *     _UID = 0
++     *     _STA = 0x0F
++     *     _CRS = ...
++     * }
++     */
++    dev = aml_device(PHILIP_DMA_ACPI_NAME);
++
++    aml_append(
++        dev,
++        aml_name_decl(
++            "_HID",
++            aml_string(PHILIP_DMA_ACPI_HID)
++        )
++    );
++
++    aml_append(
++        dev,
++        aml_name_decl(
++            "_UID",
++            aml_int(0)
++        )
++    );
++
++    /*
++     * Device is:
++     *
++     * bit0 = present
++     * bit1 = enabled
++     * bit2 = shown in UI
++     * bit3 = functioning
++     *
++     * 0x0F = all four set.
++     */
++    aml_append(
++        dev,
++        aml_name_decl(
++            "_STA",
++            aml_int(0x0F)
++        )
++    );
++
++
++    /*
++     * Build _CRS:
++     * Current Resource Settings
++     */
++    crs = aml_resource_template();
++
++
++    /*
++     * MMIO:
++     *
++     * 0xFE800000
++     * size 0x1000
++     */
++    aml_append(
++        crs,
++        aml_memory32_fixed(
++            PHILIP_DMA_BASE,
++            PHILIP_DMA_SIZE,
++            AML_READ_WRITE
++        )
++    );
++
++
++    /*
++     * Interrupt:
++     *
++     * GSI 16
++     * level-sensitive
++     * active-high
++     *
++     * This matches philip_dma_update_irq():
++     *
++     * IRQ_DONE set
++     *     -> qemu_set_irq(..., 1)
++     *
++     * W1C IRQ_STATUS
++     *     -> qemu_set_irq(..., 0)
++     */
++    irq = PHILIP_DMA_GSI;
++
++    aml_append(
++        crs,
++        aml_interrupt(
++            AML_CONSUMER,
++            AML_LEVEL,
++            AML_ACTIVE_HIGH,
++            AML_EXCLUSIVE,
++            &irq,
++            1
++        )
++    );
++
++
++    aml_append(
++        dev,
++        aml_name_decl(
++            "_CRS",
++            crs
++        )
++    );
++
++
++    aml_append(
++        scope,
++        dev
++    );
++}
++
+ static void
+ build_dsdt_microvm(GArray *table_data, BIOSLinker *linker,
+                    MicrovmMachineState *mms)
+@@ -125,6 +254,7 @@ build_dsdt_microvm(GArray *table_data, BIOSLinker *linker,
+     acpi_dsdt_add_power_button(sb_scope);
+     acpi_dsdt_add_virtio(sb_scope, mms);
+     acpi_dsdt_add_xhci(sb_scope, mms);
++    acpi_dsdt_add_philip_dma(sb_scope);
+     acpi_dsdt_add_pci(sb_scope, mms);
+     aml_append(dsdt, sb_scope);
+ 
+diff --git a/hw/i386/microvm.c b/hw/i386/microvm.c
+index 94d22a232a..e481f4345f 100644
+--- a/hw/i386/microvm.c
++++ b/hw/i386/microvm.c
+@@ -29,6 +29,9 @@
+ #include "system/runstate.h"
+ #include "acpi-microvm.h"
+ #include "microvm-dt.h"
++#include "hw/misc/philip_dma.h"
++
++#define PHILIP_DMA_IRQ 16
+ 
+ #include "hw/loader.h"
+ #include "hw/irq.h"
+@@ -203,6 +206,24 @@ static void microvm_devices_init(MicrovmMachineState *mms)
+                              x86ms->gsi[mms->virtio_irq_base + i]);
+     }
+ 
++
++/* Philip DMA controller
++{
++    DeviceState *dev;
++
++    dev = qdev_new(TYPE_PHILIP_DMA);
++
++    sysbus_realize_and_unref(
++        SYS_BUS_DEVICE(dev),
++        &error_fatal
++    );
++}*/
++
++
++sysbus_create_simple(TYPE_PHILIP_DMA, 0xFE800000, x86ms->gsi[PHILIP_DMA_IRQ]);
++
++
++
+     /* Optional and legacy devices */
+     if (x86_machine_is_acpi_enabled(x86ms)) {
+         DeviceState *dev = qdev_new(TYPE_ACPI_GED);
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index b1d8d8e5d2..225342f1ff 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -1,3 +1,4 @@
++system_ss.add(files('philip_dma.c'))
+ system_ss.add(when: 'CONFIG_APPLESMC', if_true: files('applesmc.c'))
+ system_ss.add(when: 'CONFIG_EDU', if_true: files('edu.c'))
+ system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('vmcoreinfo.c'))
+diff --git a/hw/misc/philip_dma.c b/hw/misc/philip_dma.c
+new file mode 100644
+index 0000000000..051de57c94
+--- /dev/null
++++ b/hw/misc/philip_dma.c
+@@ -0,0 +1,512 @@
++#include "qemu/osdep.h"
++#include "hw/sysbus.h"
++#include "hw/misc/philip_dma.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "system/address-spaces.h"
++#include "hw/irq.h"
++
++#define REG_SRC_ADDR      0x00
++#define REG_DST_ADDR      0x08
++#define REG_LENGTH        0x10
++#define REG_CONTROL       0x14
++#define REG_STATUS        0x18
++#define REG_IRQ_STATUS    0x1C
++#define REG_IRQ_ENABLE    0x20
++
++
++#define CTRL_START        (1u << 0)
++#define CTRL_ABORT        (1u << 1)
++
++#define STATUS_BUSY       (1u << 0)
++#define STATUS_DONE       (1u << 1)
++
++#define IRQ_DONE          (1u << 0)
++
++#define DMA_DELAY_NS      10000ULL
++
++#define TYPE_PHILIP_DMA "philip-dma"
++
++OBJECT_DECLARE_SIMPLE_TYPE(PhilipDMAState, PHILIP_DMA)
++
++
++struct PhilipDMAState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion mmio;
++
++    qemu_irq irq;
++
++    QEMUTimer *dma_timer;
++    bool inject_delay_once;
++    bool inject_drop_irq_once;
++    bool suppress_irq;
++
++    uint64_t src_addr;
++    uint64_t dst_addr;
++
++    uint32_t length;
++    uint32_t control;
++    uint32_t status;
++
++    uint32_t irq_status;
++    uint32_t irq_enable;
++};
++
++
++
++static void philip_dma_update_irq(PhilipDMAState *s)
++{
++    bool level;
++
++    level = (s->irq_status & s->irq_enable)&&
++            !s->suppress_irq;
++
++    qemu_set_irq(s->irq, level);
++}
++
++
++static void philip_dma_do_transfer(PhilipDMAState *s)
++{
++    uint8_t *buffer;
++    MemTxResult result;
++
++   /* printf("philip_dma: DMA transfer begin\n");
++    printf("  SRC = 0x%016" PRIx64 "\n", s->src_addr);
++    printf("  DST = 0x%016" PRIx64 "\n", s->dst_addr);
++    printf("  LEN = %u\n", s->length); */
++
++    if (s->length == 0) {
++        printf("philip_dma: ERROR: length is zero\n");
++
++        s->status &= ~STATUS_BUSY;
++        return;
++    }
++
++    buffer = g_malloc(s->length);
++
++    result = address_space_read(&address_space_memory,
++                                s->src_addr,
++                                MEMTXATTRS_UNSPECIFIED,
++                                buffer,
++                                s->length);
++
++    if (result != MEMTX_OK) {
++        printf("philip_dma: ERROR: source read failed\n");
++
++        g_free(buffer);
++
++        s->status &= ~STATUS_BUSY;
++        return;
++    }
++
++    result = address_space_write(&address_space_memory,
++                                 s->dst_addr,
++                                 MEMTXATTRS_UNSPECIFIED,
++                                 buffer,
++                                 s->length);
++
++    if (result != MEMTX_OK) {
++        printf("philip_dma: ERROR: destination write failed\n");
++
++        g_free(buffer);
++
++        s->status &= ~STATUS_BUSY;
++        return;
++    }
++
++    g_free(buffer);
++
++    s->status &= ~STATUS_BUSY;
++    s->status |= STATUS_DONE;
++
++    s->irq_status |= IRQ_DONE;
++
++    /*
++     * Data copying succeeded, but suppress this completion IRQ.
++     * Keep IRQ_STATUS pending so recovery must clear it.
++     */
++    if (s->inject_drop_irq_once) {
++        s->inject_drop_irq_once = false;
++        s->suppress_irq = true;
++
++        fprintf(stderr,
++                "philip_dma: injecting one-shot lost IRQ: "
++                "copy complete, STATUS=0x%08x IRQ_STATUS=0x%08x\n",
++                s->status, s->irq_status);
++    }
++
++    philip_dma_update_irq(s);
++
++   /* printf("philip_dma: DMA complete\n");*/
++}
++
++/*
++ * Cancel a pending transfer and clear its completion state.
++ *
++ * Keep SRC/DST/LENGTH and IRQ_ENABLE unchanged.
++ * The next transfer will program SRC/DST/LENGTH again.
++ */
++static void philip_dma_abort(PhilipDMAState *s)
++{
++    if (s->dma_timer) {
++        timer_del(s->dma_timer);
++    }
++
++    s->control = 0;
++    s->status = 0;
++    s->irq_status = 0;
++
++  /*
++     * Clear pending status before removing IRQ suppression.
++     */
++    s->suppress_irq = false;
++
++
++    philip_dma_update_irq(s);
++
++    fprintf(stderr,
++            "philip_dma: ABORT processed, timer cancelled, state cleared\n");
++}
++
++static void philip_dma_timer_cb(void *opaque)
++{
++    PhilipDMAState *s = opaque;
++
++    if (!(s->status & STATUS_BUSY)) {
++        return;
++    }
++   /* printf("philip_dma: timer expired\n");*/
++
++    philip_dma_do_transfer(s);
++}
++
++
++static uint64_t philip_dma_read(void *opaque,
++                                hwaddr addr,
++                                unsigned size)
++{
++    PhilipDMAState *s = opaque;
++    uint64_t value = 0;
++
++    switch (addr) {
++
++    case REG_SRC_ADDR:
++        value = s->src_addr;
++        break;
++
++    case REG_DST_ADDR:
++        value = s->dst_addr;
++        break;
++
++    case REG_LENGTH:
++        value = s->length;
++        break;
++
++    case REG_CONTROL:
++        value = s->control;
++        break;
++
++    case REG_STATUS:
++        value = s->status;
++        break;
++
++    case REG_IRQ_STATUS:
++        value = s->irq_status;
++        break;
++
++    case REG_IRQ_ENABLE:
++        value = s->irq_enable;
++        break;
++
++    default:
++       /* printf("philip_dma: invalid READ addr=0x%"
++               HWADDR_PRIx "\n",
++               addr);*/
++        break;
++    }
++
++   /* printf("philip_dma: READ addr=0x%"
++           HWADDR_PRIx
++           " size=%u value=0x%016"
++           PRIx64 "\n",
++           addr,
++           size,
++           value);*/
++
++    return value;
++}
++
++
++static void philip_dma_write(void *opaque,
++                             hwaddr addr,
++                             uint64_t value,
++                             unsigned size)
++{
++    PhilipDMAState *s = opaque;
++    uint64_t now;
++
++  /*  printf("philip_dma: WRITE addr=0x%"
++           HWADDR_PRIx
++           " size=%u value=0x%"
++           PRIx64 "\n",
++           addr,
++           size,
++           value);*/
++
++    switch (addr) {
++
++    case REG_SRC_ADDR:
++        s->src_addr = value;
++
++       /* printf("philip_dma: SRC_ADDR = 0x%016"
++               PRIx64 "\n",
++               s->src_addr);*/
++        break;
++
++
++    case REG_DST_ADDR:
++        s->dst_addr = value;
++
++       /* printf("philip_dma: DST_ADDR = 0x%016"
++               PRIx64 "\n",
++               s->dst_addr);*/
++        break;
++
++
++    case REG_LENGTH:
++        s->length = (uint32_t)value;
++
++       /* printf("philip_dma: LENGTH = %u\n",
++               s->length);*/
++        break;
++
++
++    case REG_CONTROL:
++        /*
++         * ABORT takes priority, including START | ABORT.
++         */
++        if (value & CTRL_ABORT) {
++            philip_dma_abort(s);
++            break;
++        }
++
++        s->control = (uint32_t)value;
++
++       /* printf("philip_dma: CONTROL = 0x%08x\n",
++               s->control);*/
++
++        if (s->control & CTRL_START) {
++
++           /* printf("philip_dma: START requested\n");*/
++
++            if (s->status & STATUS_BUSY) {
++               /* printf("philip_dma: DMA already busy\n");*/
++                break;
++            }
++
++            /*
++             * 開始新的 DMA 前，
++             * 清除上一筆 DONE 狀態。
++             */
++            s->status &= ~STATUS_DONE;
++
++            /*
++             * 清除上一筆 pending IRQ。
++             */
++            s->irq_status &= ~IRQ_DONE;
++
++            s->suppress_irq = false;
++
++            philip_dma_update_irq(s);
++
++            /*
++             * 設為 BUSY。
++             */
++            s->status |= STATUS_BUSY;
++
++            /*
++             * START bit self-clear。
++             */
++            s->control &= ~CTRL_START;
++
++            now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++
++            if (s->inject_delay_once) {
++                s->inject_delay_once = false;
++
++                fprintf(stderr,
++                        "philip_dma: injecting one-shot 3-second delay\n");
++
++                timer_mod(s->dma_timer,
++                          now + 3000000000LL);
++            } else {
++                timer_mod(s->dma_timer,
++                          now + DMA_DELAY_NS);
++            }
++
++           /* printf("philip_dma: DMA scheduled\n");*/
++        }
++
++        break;
++
++
++    case REG_IRQ_STATUS:
++
++        /*
++         * W1C: Write 1 to Clear
++         *
++         * irq_status = 1
++         * CPU write  = 1
++         *
++         * 1 & ~1 = 0
++         */
++        s->irq_status &= ~(uint32_t)value;
++
++       /* printf("philip_dma: IRQ_STATUS = 0x%08x\n",
++               s->irq_status);*/
++
++        philip_dma_update_irq(s);
++        break;
++
++
++    case REG_IRQ_ENABLE:
++        s->irq_enable = (uint32_t)value;
++
++       /* printf("philip_dma: IRQ_ENABLE = 0x%08x\n",
++               s->irq_enable);*/
++
++        philip_dma_update_irq(s);
++        break;
++
++
++    default:
++       /* printf("philip_dma: invalid WRITE addr=0x%"
++               HWADDR_PRIx "\n",
++               addr);*/
++        break;
++    }
++}
++
++
++static const MemoryRegionOps philip_dma_ops = {
++    .read = philip_dma_read,
++    .write = philip_dma_write,
++
++    .endianness = DEVICE_LITTLE_ENDIAN,
++
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++
++    .impl = {
++        .min_access_size = 4,
++        .max_access_size = 8,
++    },
++};
++
++
++static void philip_dma_reset(DeviceState *dev)
++{
++    PhilipDMAState *s = PHILIP_DMA(dev);
++    /*
++     * Test mode: normal DMA delay, but lose one completion IRQ.
++     */
++    s->inject_delay_once = false;
++    s->inject_drop_irq_once = false;
++    s->suppress_irq = false;
++
++    s->src_addr = 0;
++    s->dst_addr = 0;
++
++    s->length = 0;
++    s->control = 0;
++    s->status = 0;
++
++    s->irq_status = 0;
++    s->irq_enable = 0;
++
++
++    if (s->dma_timer) {
++        timer_del(s->dma_timer);
++}
++    qemu_set_irq(s->irq, 0);
++
++  }
++
++
++static void philip_dma_realize(DeviceState *dev,
++                               Error **errp)
++{
++    PhilipDMAState *s = PHILIP_DMA(dev);
++
++    s->dma_timer = timer_new_ns(
++        QEMU_CLOCK_VIRTUAL,
++        philip_dma_timer_cb,
++        s
++    );
++
++}
++
++static void philip_dma_init(Object *obj)
++{
++    PhilipDMAState *s = PHILIP_DMA(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++    memory_region_init_io(&s->mmio,
++                          obj,
++                          &philip_dma_ops,
++                          s,
++                          "philip-dma",
++                          0x1000);
++
++    sysbus_init_mmio(sbd,
++                     &s->mmio);
++
++    sysbus_init_irq(sbd,
++                    &s->irq);
++}
++
++
++static void philip_dma_finalize(Object *obj)
++{
++    PhilipDMAState *s = PHILIP_DMA(obj);
++
++    if (s->dma_timer) {
++        timer_free(s->dma_timer);
++        s->dma_timer = NULL;
++    }
++}
++
++
++static void philip_dma_class_init(ObjectClass *klass,
++                                  const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = philip_dma_realize;
++    device_class_set_legacy_reset(dc, philip_dma_reset);
++}
++
++
++static const TypeInfo philip_dma_info = {
++    .name = TYPE_PHILIP_DMA,
++    .parent = TYPE_SYS_BUS_DEVICE,
++
++    .instance_size = sizeof(PhilipDMAState),
++
++    .instance_init = philip_dma_init,
++    .instance_finalize = philip_dma_finalize,
++
++    .class_init = philip_dma_class_init,
++};
++
++
++static void philip_dma_register_types(void)
++{
++    type_register_static(&philip_dma_info);
++}
++
++
++type_init(philip_dma_register_types)
+diff --git a/include/hw/misc/philip_dma.h b/include/hw/misc/philip_dma.h
+new file mode 100644
+index 0000000000..06ecf8374b
+--- /dev/null
++++ b/include/hw/misc/philip_dma.h
+@@ -0,0 +1,6 @@
++#ifndef HW_MISC_PHILIP_DMA_H
++#define HW_MISC_PHILIP_DMA_H
++
++#define TYPE_PHILIP_DMA "philip-dma"
++
++#endif

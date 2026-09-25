@@ -1,0 +1,53 @@
+# QEMU checkout; custom changes will be exported separately
+/qemu-src/
+
+# Guest filesystem and kernel images
+/linux-guest/initramfs/
+/vmlinuz*
+/linux-guest/vmlinuz*
+/linux-guest/initrd*
+*.cpio
+*.cpio.gz
+
+# Build directories
+/build/
+
+# Kernel module build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+.tmp_versions/
+
+# Compiled executables
+*.elf
+*.bin
+/userspace/philip_dma_test
+/userspace/philip_dma_negative
+/userspace/philip_dma_concurrent
+/tests/philip_dma_test
+/tests/philip_dma_negative
+/tests/philip_dma_concurrent
+
+# Editor temporary files
+*~
+*.swp
+*.swo
+
+# Local backups
+*.save
+*.bak
+*.bak-*
+*.before-*
+*.before_*
+
+# Historical driver snapshots
+/driver/philip_dma_drv_before_acpi.c
+/driver/philip_dma_drv_phase5a.c
+/driver/philip_dma_drv_phase5b_mmio.c
+
+# Verification executable
+/tests/philip_dma_verify

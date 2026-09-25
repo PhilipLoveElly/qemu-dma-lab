@@ -1,0 +1,24 @@
+#!/bin/sh
+
+echo
+echo "================================="
+echo " Philip DMA Linux Guest"
+echo "================================="
+echo
+
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+
+echo
+echo "Kernel:"
+cat /proc/version
+
+echo
+echo "Linux boot complete."
+echo
+echo "Type:"
+echo "  insmod /lib/modules/philip_dma_drv.ko"
+echo
+
+exec /bin/sh
